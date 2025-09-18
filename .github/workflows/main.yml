@@ -1,0 +1,50 @@
+name: Build Coral Kernel
+
+on:
+  workflow_dispatch:                 # manual trigger
+  push:
+    branches:
+      - main
+      - your‑kernel‑branch
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      ARCH: arm64
+      # CROSS_COMPILE: path to toolchain, if using external GCC/Clang
+      # TOOLCHAIN: define toolchain settings
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          submodules: true            # if kernel references submodules
+
+      - name: Setup toolchain
+        run: |
+          # install/clone the compiler you need, e.g. AOSP clang, or GCC
+          # something like apt install gcc‑arm‑aarch64 etc.
+          # or download from Google/Ninja etc.
+
+      - name: Configure kernel
+        run: |
+          export KBUILD_OUTPUT=out
+          make floral_defconfig       # or whatever defconfig for flame/coral
+
+      - name: Build kernel
+        run: |
+          make -j$(nproc) \
+            ARCH=${{ env.ARCH }} \
+            CROSS_COMPILE=${{ env.CROSS_COMPILE }} \
+            # possibly CC=clang if using clang
+
+      - name: Collect build artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: coral-kernel‑build
+          path: out/arch/arm64/boot/Image.gz-dtb   # or whatever final image is
+
+      - name: (Optional) Build flashable Zip via AnyKernel3
+        run: |
+          # clone AnyKernel3, copy the built image, package
