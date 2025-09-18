@@ -32,7 +32,7 @@ jobs:
         run: |
           mkdir -p toolchains/clang
           cd toolchains/clang
-          curl -L "${{ env.CLANG_URL_BASE}${CLANG_SHA}.tar.gz" | tar --strip-components=1 -xz
+          curl -L "${ env.CLANG_URL_BASE}${CLANG_SHA}.tar.gz" | tar --strip-components=1 -xz
 
       - name: Add Clang to PATH
         run: echo "${{ github.workspace }}/toolchains/clang/bin" >> $GITHUB_PATH
