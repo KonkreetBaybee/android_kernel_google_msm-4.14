@@ -1,50 +1,141 @@
 name: Build Coral Kernel
 
 on:
-  workflow_dispatch:                 # manual trigger
+  workflow_dispatch:
   push:
     branches:
       - main
-      - your‑kernel‑branch
 
 jobs:
   build:
     runs-on: ubuntu-latest
     env:
       ARCH: arm64
-      # CROSS_COMPILE: path to toolchain, if using external GCC/Clang
-      # TOOLCHAIN: define toolchain settings
+      CLANG_VERSION: 12.0.5
+      CLANG_SHA: c935d99d7cf2016289302412d708641d52d2f7ee
+      CLANG_URL: https://android.googlesource.com/toolchain/llvm-project/+archive/${{ env.CLANG_SHA }}.tar.gz
 
     steps:
-      - name: Checkout source
+      - name: Checkout kernel source
         uses: actions/checkout@v4
+
+      - name: Install dependencies via apt
+        run: |
+          sudo apt update
+          sudo apt install -y \
+            bc bison build-essential ca-certificates ccache curl flex git \
+            libelf-dev libssl-dev lzop python3 rsync unzip zip zlib1g-dev \
+            clang lld llvm
+
+      - name: Fetch Clang 12.0.5
+        run: |
+          mkdir -p toolchains/clang
+          cd toolchains/clang
+          curl -L "${{ env.CLANG_URL }}" | tar --strip-components=1 -xz
+
+      - name: Add Clang to PATH
+        run: echo "${{ github.workspace }}/toolchains/clang/bin" >> $GITHUB_PATH
+
+      - name: Configure kernel (Docker-friendly flags appended)
+        run: |
+          export PATH=${{ github.workspace }}/toolchains/clang/bin:$PATH
+          export ARCH=${{ env.ARCH }}
+          export CC=clang
+          export CLANG_TRIPLE=aarch64-linux-gnu-
+
+          # 1) Base defconfig for coral/flame combined (floral)
+          make floral_defconfig
+
+          # 2) Append container/Docker support flags
+          cat <<'EOF' >> .config
+          CONFIG_NAMESPACES=y
+          CONFIG_UTS_NS=y
+          CONFIG_IPC_NS=y
+          CONFIG_PID_NS=y
+          CONFIG_NET_NS=y
+          CONFIG_USER_NS=y
+          CONFIG_CGROUPS=y
+          CONFIG_CGROUP_BPF=y
+          CONFIG_CGROUP_DEVICE=y
+          CONFIG_CGROUP_FREEZER=y
+          CONFIG_CGROUP_CPUACCT=y
+          CONFIG_CGROUP_SCHED=y
+          CONFIG_CGROUP_PERF=y
+          CONFIG_OVERLAY_FS=y
+          CONFIG_SECCOMP=y
+          CONFIG_SECCOMP_FILTER=y
+          CONFIG_BPF=y
+          CONFIG_BPF_SYSCALL=y
+          CONFIG_NET_CLS_BPF=y
+          CONFIG_NETFILTER_XT_MATCH_BPF=y
+          CONFIG_NETFILTER_XT_MATCH_MAC=y
+          CONFIG_BLK_DEV_LOOP=y
+          CONFIG_VETH=y
+          CONFIG_BRIDGE=y
+          CONFIG_NETFILTER=y
+          CONFIG_BRIDGE_NETFILTER=y
+          CONFIG_NF_NAT=y
+          CONFIG_IP_NF_TARGET_MASQUERADE=y
+          CONFIG_NETFILTER_XT_MATCH_ADDRTYPE=y
+          CONFIG_NETFILTER_XT_MATCH_CONNTRACK=y
+          CONFIG_NETFILTER_XT_MATCH_IPVS=y
+          CONFIG_UNIX=y
+          CONFIG_TMPFS=y
+          CONFIG_TMPFS_XATTR=y
+          CONFIG_MEMCG=y
+          CONFIG_IPVLAN=y
+          CONFIG_MACVLAN=y
+          CONFIG_DUMMY=y
+          CONFIG_NETFILTER_XT_TARGET_CHECKSUM=y
+          EOF
+
+          # 3) Finalize config
+          yes "" | make olddefconfig
+
+      - name: Build kernel with Clang
+        run: |
+          export PATH=${{ github.workspace }}/toolchains/clang/bin:$PATH
+          export ARCH=${{ env.ARCH }}
+          export CC=clang
+          export CLANG_TRIPLE=aarch64-linux-gnu-
+          make -j"$(nproc)"
+
+      - name: Upload raw Image.gz-dtb
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
         with:
-          submodules: true            # if kernel references submodules
+          name: coral-Image.gz-dtb
+          path: arch/arm64/boot/Image.gz-dtb
 
-      - name: Setup toolchain
+      # === AnyKernel3 packaging ===
+      - name: Prepare AnyKernel3 workspace
         run: |
-          # install/clone the compiler you need, e.g. AOSP clang, or GCC
-          # something like apt install gcc‑arm‑aarch64 etc.
-          # or download from Google/Ninja etc.
+          mkdir -p out
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git ak3
+          # Minimal AK3 edits for device/codename branding (optional)
+          sed -i 's/^kernel.string=.*/kernel.string=Coral\/Flame (floral) custom build/' ak3/anykernel.sh
+          sed -i 's/^device.name1=.*/device.name1=coral/' ak3/anykernel.sh
+          sed -i 's/^device.name2=.*/device.name2=flame/' ak3/anykernel.sh
+          # If your AK3 template expects a different file name, keep it as Image.gz-dtb
+          cp -f arch/arm64/boot/Image.gz-dtb ak3/Image.gz-dtb
 
-      - name: Configure kernel
-        run: |
-          export KBUILD_OUTPUT=out
-          make floral_defconfig       # or whatever defconfig for flame/coral
+          # Optionally include dtbo if you generate it as part of kernel build (adjust path if needed)
+          if [ -f arch/arm64/boot/dtbo.img ]; then
+            cp -f arch/arm64/boot/dtbo.img ak3/dtbo.img
+          fi
 
-      - name: Build kernel
-        run: |
-          make -j$(nproc) \
-            ARCH=${{ env.ARCH }} \
-            CROSS_COMPILE=${{ env.CROSS_COMPILE }} \
-            # possibly CC=clang if using clang
+          # Optionally include kernel modules (if you build them)
+          # make modules INSTALL_MOD_PATH="$PWD/modout"
+          # find modout -name '*.ko' -exec strip --strip-unneeded {} \; || true
+          # mkdir -p ak3/modules
+          # cp -ar modout/lib/modules/* ak3/modules/ || true
 
-      - name: Collect build artifacts
-        uses: actions/upload-artifact@v3
+          ZIP_NAME="Coral-Flame_AK3_${{ github.run_number }}_$(date +%Y%m%d).zip"
+          (cd ak3 && zip -r9 "../out/${ZIP_NAME}" .)
+          echo "ZIP_PATH=${PWD}/out/${ZIP_NAME}" >> $GITHUB_ENV
+
+      - name: Upload AnyKernel3 flashable ZIP
+        uses: actions/upload-artifact@v4
         with:
-          name: coral-kernel‑build
-          path: out/arch/arm64/boot/Image.gz-dtb   # or whatever final image is
-
-      - name: (Optional) Build flashable Zip via AnyKernel3
-        run: |
-          # clone AnyKernel3, copy the built image, package
+          name: coral-anykernel3-zip
+          path: ${{ env.ZIP_PATH }}
