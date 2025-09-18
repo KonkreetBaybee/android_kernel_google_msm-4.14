@@ -13,7 +13,7 @@ jobs:
       ARCH: arm64
       CLANG_VERSION: 12.0.5
       CLANG_SHA: c935d99d7cf2016289302412d708641d52d2f7ee
-      CLANG_URL: https://android.googlesource.com/toolchain/llvm-project/+archive/${{ env.CLANG_SHA }}.tar.gz
+      CLANG_URL_BASE: https://android.googlesource.com/toolchain/llvm-project/+archive/
 
     steps:
       - name: Checkout kernel source
@@ -31,7 +31,7 @@ jobs:
         run: |
           mkdir -p toolchains/clang
           cd toolchains/clang
-          curl -L "${{ env.CLANG_URL }}" | tar --strip-components=1 -xz
+          curl -L "${{ env.CLANG_URL_BASE}${CLANG_SHA}.tar.gz" | tar --strip-components=1 -xz
 
       - name: Add Clang to PATH
         run: echo "${{ github.workspace }}/toolchains/clang/bin" >> $GITHUB_PATH
