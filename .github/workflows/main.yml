@@ -75,32 +75,89 @@ jobs:
           fi
           make -C . O="${O}" ARCH=${ARCH} CC="ccache clang" ${DEFCONFIG}
 
-      - name: Enable Docker kernel features
-        run: |
-          set -xe
+      -    # Always use the source-tree scripts/config, and point it at O/.config
           CFG="${PWD}/scripts/config"
           if [ ! -x "$CFG" ]; then
+            # Build host tools (conf, etc.) so scripts/config can run cleanly
             make -C . O="${O}" ARCH=${ARCH} CC="ccache clang" scripts
           fi
-          CFG="${PWD}/${O}/scripts/config"
+
+          # Ensure scripts/config is executable (some trees ship it without +x)
+          chmod +x "$CFG" || true
+
+          # Tell Kconfig to edit the build tree's config
+          export KCONFIG_CONFIG="${PWD}/${O}/.config"
+
+          # Keep a copy for diff
           cp -f "${O}/.config" "${O}/.config.before"
 
-          # Namespaces & cgroups
-          "$CFG" --enable NAMESPACES UTS_NS IPC_NS PID_NS NET_NS USER_NS
-          "$CFG" --enable CGROUPS MEMCG CGROUP_SCHED FAIR_GROUP_SCHED BLK_CGROUP CGROUP_PIDS
-          "$CFG" --enable CGROUP_DEVICE CGROUP_BPF CGROUP_FREEZER CGROUP_PERF
+          # --- Namespaces & cgroups ---
+          "$CFG" --enable NAMESPACES
+          "$CFG" --enable UTS_NS
+          "$CFG" --enable IPC_NS
+          "$CFG" --enable PID_NS
+          "$CFG" --enable NET_NS
+          "$CFG" --enable USER_NS
 
-          # Containers
-          "$CFG" --enable SECCOMP SECCOMP_FILTER BPF BPF_SYSCALL SYSFS PROC_FS BLK_DEV_LOOP UNIX TMPFS TMPFS_XATTR OVERLAY_FS
+          "$CFG" --enable CGROUPS
+          "$CFG" --enable MEMCG
+          "$CFG" --enable CGROUP_SCHED
+          "$CFG" --enable FAIR_GROUP_SCHED
+          "$CFG" --enable BLK_CGROUP
+          "$CFG" --enable CGROUP_PIDS
+          "$CFG" --enable CGROUP_DEVICE
+          "$CFG" --enable CGROUP_BPF
+          "$CFG" --enable CGROUP_FREEZER
+          "$CFG" --enable CGROUP_PERF
 
-          # Networking
-          "$CFG" --enable NETFILTER BRIDGE BRIDGE_NETFILTER VETH NF_CONNTRACK NF_NAT
-          "$CFG" --enable NETFILTER_XT_MATCH_ADDRTYPE NETFILTER_XT_MATCH_CONNTRACK NETFILTER_XT_MATCH_MAC NETFILTER_XT_MATCH_BPF NETFILTER_XT_TARGET_CHECKSUM
-          "$CFG" --enable IP_NF_IPTABLES IP_NF_FILTER IP_NF_NAT IP_NF_TARGET_MASQUERADE
-          "$CFG" --enable IP6_NF_IPTABLES IP6_NF_FILTER IP6_NF_NAT IP6_NF_TARGET_MASQUERADE
+          # --- Containers / core ---
+          "$CFG" --enable SECCOMP
+          "$CFG" --enable SECCOMP_FILTER
+          "$CFG" --enable BPF
+          "$CFG" --enable BPF_SYSCALL
+          "$CFG" --enable SYSFS
+          "$CFG" --enable PROC_FS
+          "$CFG" --enable BLK_DEV_LOOP
+          "$CFG" --enable UNIX
+          "$CFG" --enable TMPFS
+          "$CFG" --enable TMPFS_XATTR
+          "$CFG" --enable OVERLAY_FS
 
+          # --- Networking (bridge / veth / NAT+masq) ---
+          "$CFG" --enable NETFILTER
+          "$CFG" --enable BRIDGE
+          "$CFG" --enable BRIDGE_NETFILTER
+          "$CFG" --enable VETH
+          "$CFG" --enable NF_CONNTRACK
+          "$CFG" --enable NF_NAT
+          "$CFG" --enable NETFILTER_XT_MATCH_ADDRTYPE
+          "$CFG" --enable NETFILTER_XT_MATCH_CONNTRACK
+          "$CFG" --enable NETFILTER_XT_MATCH_MAC
+          "$CFG" --enable NETFILTER_XT_MATCH_BPF
+          "$CFG" --enable NETFILTER_XT_TARGET_CHECKSUM
+
+          # IPv4 NAT/MASQ
+          "$CFG" --enable IP_NF_IPTABLES
+          "$CFG" --enable IP_NF_FILTER
+          "$CFG" --enable IP_NF_NAT
+          "$CFG" --enable IP_NF_TARGET_MASQUERADE
+
+          # IPv6 NAT/MASQ (optional if you need v6 containers)
+          "$CFG" --enable IP6_NF_IPTABLES
+          "$CFG" --enable IP6_NF_FILTER
+          "$CFG" --enable IP6_NF_NAT
+          "$CFG" --enable IP6_NF_TARGET_MASQUERADE
+
+          # Finalize & resolve deps
           yes "" | make -C . O="${O}" ARCH=${ARCH} olddefconfig
-          diff -u "${O}/.config.before" "${O}/.config" | || true
+
+          # Show delta
+          if [ -x "${PWD}/scripts/diffconfig" ]; then
+            echo "===== Docker feature delta ====="
+            "${PWD}/scripts/diffconfig" "${O}/.config.before" "${O}/.config" || true
+          else
+            diff -u "${O}/.config.before" "${O}/.config" || true
+          fi
 
       - name: Build kernel (Image.gz-dtb, dtbs, modules)
         env:
