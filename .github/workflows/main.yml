@@ -1,16 +1,16 @@
-name: Build Floral/Coral Kernel (Clang)
+name: Build Coral Kernel
 
 on:
   workflow_dispatch:
     inputs:
-      clang_ver:
-        description: "Ubuntu clang version (e.g., 17, 18)"
-        required: false
-        default: "17"
       jobs:
         description: "make -j jobs (default: nproc)"
         required: false
         default: ""
+  push:
+    branches:
+      - main
+      - lineage-22.2
 
 permissions:
   contents: read
@@ -21,16 +21,14 @@ jobs:
     env:
       ARCH: arm64
       SUBARCH: arm64
-      # Cross triples (used when LLVM=1 calls llvm- prefixed tools; we still install binutils for some scripts)
-      CROSS_COMPILE: aarch64-linux-gnu-
-      CROSS_COMPILE_ARM32: arm-linux-gnueabi-
+      O: out
       LLVM: "1"
       LLVM_IAS: "1"
-      # Let ccache wrap clang & clang++
+      CROSS_COMPILE: aarch64-linux-gnu-
+      CROSS_COMPILE_ARM32: arm-linux-gnueabi-
       CCACHE_DIR: ${{ github.workspace }}/.ccache
       CCACHE_COMPRESS: "1"
       CCACHE_MAXSIZE: "8G"
-      O: out
 
     steps:
       - name: Checkout kernel source
@@ -38,27 +36,23 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Install build deps (clang, binutils, build tools)
+      - name: Install build deps
         run: |
           sudo apt-get -yq update
           sudo apt-get -yq install \
-            clang-${{ inputs.clang_ver }} lld-${{ inputs.clang_ver }} llvm-${{ inputs.clang_ver }} \
+            clang lld llvm \
             gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
-            bc bison flex libssl-dev libelf-dev dwarves ccache make git python3
-
-          # Symlink generic clang/lld to requested version for convenience
-          sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-${{ inputs.clang_ver }} 100
-          sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-${{ inputs.clang_ver }} 100
-          sudo update-alternatives --install /usr/bin/ld.lld ld.lld /usr/bin/ld.lld-${{ inputs.clang_ver }} 100
+            bc bison flex libssl-dev libelf-dev dwarves ccache make git python3 \
+            unzip zip rsync curl ca-certificates
           echo "clang: $(clang --version | head -n1)"
 
       - name: Prime ccache
         uses: actions/cache@v4
         with:
           path: ${{ env.CCACHE_DIR }}
-          key: ccache-${{ runner.os }}-clang${{ inputs.clang_ver }}-${{ github.sha }}
+          key: ccache-${{ runner.os }}-clang-${{ github.sha }}
           restore-keys: |
-            ccache-${{ runner.os }}-clang${{ inputs.clang_ver }}-
+            ccache-${{ runner.os }}-clang-
             ccache-${{ runner.os }}-
 
       - name: Show floral build configs present
@@ -72,8 +66,6 @@ jobs:
         run: |
           set -xe
           mkdir -p "${O}"
-
-          # Try to find a floral defconfig (typical name is 'floral_defconfig')
           DEFCONFIG="$(ls arch/arm64/configs/*floral*_defconfig 2>/dev/null | xargs -r -n1 basename | head -n1 || true)"
           if [ -z "${DEFCONFIG}" ]; then
             DEFCONFIG="floral_defconfig"
@@ -81,48 +73,82 @@ jobs:
           else
             echo "Detected defconfig: ${DEFCONFIG}"
           fi
-
-          # Use ccache by prepending CC="ccache clang"
           make -C . O="${O}" ARCH=${ARCH} CC="ccache clang" ${DEFCONFIG}
+
+      - name: Enable Docker kernel features
+        run: |
+          set -xe
+          CFG="${PWD}/scripts/config"
+          if [ ! -x "$CFG" ]; then
+            make -C . O="${O}" ARCH=${ARCH} CC="ccache clang" scripts
+          fi
+          CFG="${PWD}/${O}/scripts/config"
+          cp -f "${O}/.config" "${O}/.config.before"
+
+          # Namespaces & cgroups
+          "$CFG" --enable NAMESPACES UTS_NS IPC_NS PID_NS NET_NS USER_NS
+          "$CFG" --enable CGROUPS MEMCG CGROUP_SCHED FAIR_GROUP_SCHED BLK_CGROUP CGROUP_PIDS
+          "$CFG" --enable CGROUP_DEVICE CGROUP_BPF CGROUP_FREEZER CGROUP_PERF
+
+          # Containers
+          "$CFG" --enable SECCOMP SECCOMP_FILTER BPF BPF_SYSCALL SYSFS PROC_FS BLK_DEV_LOOP UNIX TMPFS TMPFS_XATTR OVERLAY_FS
+
+          # Networking
+          "$CFG" --enable NETFILTER BRIDGE BRIDGE_NETFILTER VETH NF_CONNTRACK NF_NAT
+          "$CFG" --enable NETFILTER_XT_MATCH_ADDRTYPE NETFILTER_XT_MATCH_CONNTRACK NETFILTER_XT_MATCH_MAC NETFILTER_XT_MATCH_BPF NETFILTER_XT_TARGET_CHECKSUM
+          "$CFG" --enable IP_NF_IPTABLES IP_NF_FILTER IP_NF_NAT IP_NF_TARGET_MASQUERADE
+          "$CFG" --enable IP6_NF_IPTABLES IP6_NF_FILTER IP6_NF_NAT IP6_NF_TARGET_MASQUERADE
+
+          yes "" | make -C . O="${O}" ARCH=${ARCH} olddefconfig
+          diff -u "${O}/.config.before" "${O}/.config" | || true
 
       - name: Build kernel (Image.gz-dtb, dtbs, modules)
         env:
-          # Allow caller to override -j, else use nproc
           MAKEJ: ${{ inputs.jobs }}
         run: |
           set -xe
           J=${MAKEJ:-"$(nproc)"}
-          echo "Using -j${J}"
-          # Common flags for LLVM build
           export KCFLAGS="-Wno-error"
           make -C . O="${O}" ARCH=${ARCH} CC="ccache clang" \
                LLVM=${LLVM} LLVM_IAS=${LLVM_IAS} \
                CROSS_COMPILE=${CROSS_COMPILE} \
                CROSS_COMPILE_ARM32=${CROSS_COMPILE_ARM32} \
                -j"${J}"
-
-          # Useful outputs:
-          ls -lh "${O}/arch/arm64/boot/" || true
-          ls -lh "${O}/arch/arm64/boot/dts" || true
+          ls -lh "${O}/arch/arm64/boot/"
           [ -f "${O}/arch/arm64/boot/Image.gz-dtb" ] || (echo "Image.gz-dtb missing" && exit 2)
 
-      - name: Package artifacts
+      - name: Upload raw Image.gz-dtb
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: coral-Image.gz-dtb
+          path: out/arch/arm64/boot/Image.gz-dtb
+
+      - name: Package dtbs and modules (optional)
         run: |
           set -xe
           mkdir -p dist
           cp -av "${O}/.config" dist/kernel.config
-          cp -av "${O}/arch/arm64/boot/Image.gz-dtb" dist/ || true
-          # dtbs
-          (tar -C "${O}/arch/arm64/boot/dts" -acf dist/dtbs.tar.zst .) || true
-          # modules (if any built as M)
+          [ -d "${O}/arch/arm64/boot/dts" ] && (tar -C "${O}/arch/arm64/boot/dts" -acf dist/dtbs.tar.zst .) || true
           (make -C . O="${O}" ARCH=${ARCH} modules_install INSTALL_MOD_PATH="${PWD}/_mods") || true
           (cd _mods && tar -acf ../dist/modules.tar.zst .) || true
-          echo "Dist contents:"
-          ls -lh dist || true
 
-      - name: Upload artifacts
+      - name: Prepare AnyKernel3 workspace
+        run: |
+          set -xe
+          mkdir -p out ak3
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git ak3
+          sed -i 's/^kernel.string=.*/kernel.string=Coral\/Flame (floral) custom build/' ak3/anykernel.sh
+          sed -i 's/^device.name1=.*/device.name1=coral/' ak3/anykernel.sh
+          sed -i 's/^device.name2=.*/device.name2=flame/' ak3/anykernel.sh
+          cp -f "${PWD}/out/arch/arm64/boot/Image.gz-dtb" ak3/Image.gz-dtb
+          [ -f "${PWD}/out/arch/arm64/boot/dtbo.img" ] && cp -f "${PWD}/out/arch/arm64/boot/dtbo.img" ak3/dtbo.img
+          ZIP_NAME="Coral-Flame_AK3_${{ github.run_number }}_$(date +%Y%m%d).zip"
+          (cd ak3 && zip -r9 "../out/${ZIP_NAME}" .)
+          echo "ZIP_PATH=${PWD}/out/${ZIP_NAME}" >> $GITHUB_ENV
+
+      - name: Upload AnyKernel3 flashable ZIP
         uses: actions/upload-artifact@v4
         with:
-          name: floral-kernel-clang${{ inputs.clang_ver }}
-          path: dist/
-          if-no-files-found: error
+          name: coral-anykernel3-zip
+          path: ${{ env.ZIP_PATH }}
