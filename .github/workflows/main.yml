@@ -29,6 +29,8 @@ jobs:
       CCACHE_DIR: ${{ github.workspace }}/.ccache
       CCACHE_COMPRESS: "1"
       CCACHE_MAXSIZE: "8G"
+      SHELL: /bin/bash
+      CONFIG_SHELL: /bin/bash
 
     steps:
       - name: Checkout kernel source
