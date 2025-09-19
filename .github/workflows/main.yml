@@ -75,23 +75,21 @@ jobs:
           fi
           make -C . O="${O}" ARCH=${ARCH} CC="ccache clang" ${DEFCONFIG}
 
-      -    # Always use the source-tree scripts/config, and point it at O/.config
+      - name: Enable Docker kernel features
+        run: |
+          set -xe
+
+          # Always use the source-tree scripts/config, and point it at O/.config
           CFG="${PWD}/scripts/config"
           if [ ! -x "$CFG" ]; then
-            # Build host tools (conf, etc.) so scripts/config can run cleanly
             make -C . O="${O}" ARCH=${ARCH} CC="ccache clang" scripts
           fi
-
-          # Ensure scripts/config is executable (some trees ship it without +x)
           chmod +x "$CFG" || true
-
-          # Tell Kconfig to edit the build tree's config
           export KCONFIG_CONFIG="${PWD}/${O}/.config"
 
-          # Keep a copy for diff
           cp -f "${O}/.config" "${O}/.config.before"
 
-          # --- Namespaces & cgroups ---
+          # Namespaces & cgroups
           "$CFG" --enable NAMESPACES
           "$CFG" --enable UTS_NS
           "$CFG" --enable IPC_NS
@@ -110,7 +108,7 @@ jobs:
           "$CFG" --enable CGROUP_FREEZER
           "$CFG" --enable CGROUP_PERF
 
-          # --- Containers / core ---
+          # Containers
           "$CFG" --enable SECCOMP
           "$CFG" --enable SECCOMP_FILTER
           "$CFG" --enable BPF
@@ -123,7 +121,7 @@ jobs:
           "$CFG" --enable TMPFS_XATTR
           "$CFG" --enable OVERLAY_FS
 
-          # --- Networking (bridge / veth / NAT+masq) ---
+          # Networking
           "$CFG" --enable NETFILTER
           "$CFG" --enable BRIDGE
           "$CFG" --enable BRIDGE_NETFILTER
@@ -135,23 +133,17 @@ jobs:
           "$CFG" --enable NETFILTER_XT_MATCH_MAC
           "$CFG" --enable NETFILTER_XT_MATCH_BPF
           "$CFG" --enable NETFILTER_XT_TARGET_CHECKSUM
-
-          # IPv4 NAT/MASQ
           "$CFG" --enable IP_NF_IPTABLES
           "$CFG" --enable IP_NF_FILTER
           "$CFG" --enable IP_NF_NAT
           "$CFG" --enable IP_NF_TARGET_MASQUERADE
-
-          # IPv6 NAT/MASQ (optional if you need v6 containers)
           "$CFG" --enable IP6_NF_IPTABLES
           "$CFG" --enable IP6_NF_FILTER
           "$CFG" --enable IP6_NF_NAT
           "$CFG" --enable IP6_NF_TARGET_MASQUERADE
 
-          # Finalize & resolve deps
           yes "" | make -C . O="${O}" ARCH=${ARCH} olddefconfig
 
-          # Show delta
           if [ -x "${PWD}/scripts/diffconfig" ]; then
             echo "===== Docker feature delta ====="
             "${PWD}/scripts/diffconfig" "${O}/.config.before" "${O}/.config" || true
